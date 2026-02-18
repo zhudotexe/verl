@@ -16,6 +16,12 @@ from .agent_loop import AgentLoopBase, AgentLoopManager, AgentLoopWorker, AsyncL
 from .single_turn_agent_loop import SingleTurnAgentLoop
 from .tool_agent_loop import ToolAgentLoop
 
-_ = [SingleTurnAgentLoop, ToolAgentLoop]
+# Import multi-trajectory agent loop to register it
+try:
+    from verl.experimental.multi_trajectory.multi_trajectory_agent_loop import MultiTrajectoryAgentLoop
+except ImportError:
+    MultiTrajectoryAgentLoop = None
+
+_ = [SingleTurnAgentLoop, ToolAgentLoop, MultiTrajectoryAgentLoop]
 
 __all__ = ["AgentLoopBase", "AgentLoopManager", "AsyncLLMServerManager", "AgentLoopWorker"]

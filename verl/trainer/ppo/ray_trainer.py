@@ -65,6 +65,18 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
+# Multi-trajectory support (lazy import to avoid circular dependencies)
+_multi_trajectory_module = None
+
+
+def _get_multi_trajectory_module():
+    """Lazily import multi-trajectory module."""
+    global _multi_trajectory_module
+    if _multi_trajectory_module is None:
+        from verl.experimental import multi_trajectory as mt
+        _multi_trajectory_module = mt
+    return _multi_trajectory_module
+
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -300,6 +312,12 @@ class RayPPOTrainer:
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+
+        # Multi-trajectory support: allows spawning multiple trainable trajectories per prompt
+        multi_traj_config = self.config.actor_rollout_ref.rollout.get("multi_trajectory", {})
+        self.enable_multi_trajectory = multi_traj_config.get("enable", False)
+        if self.enable_multi_trajectory:
+            print("Multi-trajectory training enabled")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1312,6 +1330,17 @@ class RayPPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
+                        # Multi-trajectory: expand outputs containing spawned trajectories into separate rows
+                        if self.enable_multi_trajectory:
+                            with marked_timer("multi_traj_expand", timing_raw, color="magenta"):
+                                mt = _get_multi_trajectory_module()
+                                gen_batch_output = mt.expand_multi_trajectory_batch(
+                                    gen_batch_output,
+                                    self.tokenizer,
+                                    self.config.actor_rollout_ref.rollout.prompt_length,
+                                    self.config.actor_rollout_ref.rollout.response_length,
+                                )
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -1370,6 +1399,16 @@ class RayPPOTrainer:
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                        # Multi-trajectory: broadcast reward from source trajectory to all group members
+                        if self.enable_multi_trajectory:
+                            mt = _get_multi_trajectory_module()
+                            batch = mt.broadcast_reward_by_trajectory_group(batch, reward_key="rm_scores")
+                            # Re-extract after broadcast
+                            reward_tensor = batch.batch["rm_scores"]
+                            # Log multi-trajectory metrics
+                            multi_traj_metrics = mt.compute_trajectory_group_metrics(batch)
+                            metrics.update(multi_traj_metrics)
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
