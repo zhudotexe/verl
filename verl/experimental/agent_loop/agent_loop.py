@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import heapq
+import itertools
 import logging
 import os
 import random
@@ -24,9 +25,9 @@ import hydra
 import numpy as np
 import ray
 import torch
+from PIL import Image
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
-from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
@@ -132,21 +133,21 @@ class AgentLoopMetrics(BaseModel):
 class AgentLoopOutput(BaseModel):
     """Agent loop output."""
 
-    prompt_ids: list[int]
+    prompt_ids: list[int] | list[list[int]]
     """Prompt token ids."""
-    response_ids: list[int]
+    response_ids: list[int] | list[list[int]]
     """Response token ids including LLM generated token, tool response token."""
-    response_mask: list[int]
+    response_mask: list[int] | list[list[int]]
     """Response mask, 1 for LLM generated token, 0 for tool response token."""
-    response_logprobs: Optional[list[float]] = None
+    response_logprobs: Optional[list[float] | list[list[float]]] = None
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
     """Routed experts for the total tokens."""
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
-    reward_score: Optional[float] = None
+    reward_score: Optional[float | list[float]] = None
     """Reward score for the trajectory."""
-    num_turns: int = 0
+    num_turns: int | list[int] = 0
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
@@ -490,9 +491,9 @@ class AgentLoopWorker:
             name="agent_loop",
             trace=trace,
         ):
-            assert agent_name in _agent_loop_registry, (
-                f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
-            )
+            assert (
+                agent_name in _agent_loop_registry
+            ), f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
 
             agent_loop_config = _agent_loop_registry[agent_name]
             agent_loop = hydra.utils.instantiate(
@@ -568,13 +569,24 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
-            response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
+            # multi-traj: if output.response_logprobs is not a batch,
+            if not isinstance(output.response_logprobs[0], list):
+                # pad it as a single list + unsqueeze to bsz 1
+                pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
+                response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
+            else:
+                # otherwise pad each element in the batch
+                temp = []
+                for elem in output.response_logprobs:
+                    pad_size = self.config.actor_rollout_ref.rollout.response_length - len(elem)
+                    temp.append(torch.tensor(elem + [0.0] * pad_size))
+                response_logprobs = torch.vstack(temp)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
         input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
 
+        # todo(andrz) I don't think this works with multi-trajectory, but it also isn't used in multiturn so eh
         routed_experts = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
@@ -599,8 +611,14 @@ class AgentLoopWorker:
 
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
-        multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+        # todo(andrz) multi-trajectory won't like multimodal
+        if input_ids.shape[0] > 1:
+            multi_modal_inputs = {}  # hardcoded to not do any multimodal stuff
+            position_ids = compute_position_id_with_mask(attention_mask)  # this works with batch input already, yay
+        else:
+            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+
         await self._compute_score(
             output,
             prompts=prompt_output["input_ids"],
@@ -692,20 +710,23 @@ class AgentLoopWorker:
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
+            bsz = input_ids.shape[0]
             batch = TensorDict(
                 {
-                    "prompts": prompts,  # [1, prompt_length]
-                    "responses": responses,  # [1, response_length]
-                    "attention_mask": attention_mask,  # [1, prompt_length + response_length]
-                    "input_ids": input_ids,  # [1, prompt_length + response_length]
+                    "prompts": prompts,  # [bsz, prompt_length]
+                    "responses": responses,  # [bsz, response_length]
+                    "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
+                    "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                     "position_ids": position_ids,
                 },
-                batch_size=1,
+                batch_size=bsz,
             )
             non_tensor_batch = {
-                **{k: np.array([v]) for k, v in kwargs.items()},
-                "__num_turns__": np.array([output.num_turns]),
-                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                **{k: np.array([v] * bsz) for k, v in kwargs.items()},
+                "__num_turns__": np.array(
+                    [output.num_turns] if not isinstance(output.num_turns, list) else output.num_turns
+                ),
+                "tool_extra_fields": np.array([output.extra_fields] * bsz, dtype=object),
             }
 
             data = DataProto(
@@ -747,10 +768,15 @@ class AgentLoopWorker:
                 "position_ids": position_ids,
                 **optional_outputs,
             },
-            batch_size=len(inputs),
+            batch_size=prompt_ids.size(0),
         )
 
+        # score can be a float or a tensor
         scores = [input.reward_score for input in inputs]
+        if all(isinstance(score, list) for score in scores):
+            # flatten them if they're a list, which should ensure they match the bsz
+            scores = list(itertools.chain.from_iterable(scores))
+            assert len(scores) == prompt_ids.size(0)
         if all(score is not None for score in scores):
             prompt_length = prompt_ids.size(1)
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
@@ -759,8 +785,9 @@ class AgentLoopWorker:
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {
-            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
+            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32).flatten(),
         }
+        # todo(andrz): I don't think this runs in multi-traj
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
 
@@ -768,7 +795,7 @@ class AgentLoopWorker:
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
         reward_extra_keys = list(reward_extra_infos[0].keys())
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos]).flatten()
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
@@ -791,7 +818,7 @@ class AgentLoopWorker:
         for key in all_keys:
             temp_arr = np.empty(len(inputs), dtype=object)
             temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
-            extra_fields[key] = temp_arr
+            extra_fields[key] = temp_arr.flatten()
 
         non_tensor_batch.update(extra_fields)
 
@@ -904,12 +931,10 @@ class AgentLoopManager:
         if self.worker_group and rollout_config.name != "trtllm":
             self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
         elif self.worker_group and rollout_config.name == "trtllm":
-            self._run_all(
-                [
-                    server.init_hybrid_colocated(self.worker_group, rollout_resource_pool)
-                    for server in self.rollout_replicas
-                ]
-            )
+            self._run_all([
+                server.init_hybrid_colocated(self.worker_group, rollout_resource_pool)
+                for server in self.rollout_replicas
+            ])
         else:
             self._run_all([server.init_standalone() for server in self.rollout_replicas])
 
@@ -952,12 +977,10 @@ class AgentLoopManager:
         """
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
-            ]
-        )
+        outputs = ray.get([
+            worker.generate_sequences.remote(chunk)
+            for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+        ])
         output = DataProto.concat(outputs)
 
         # calculate performance metrics

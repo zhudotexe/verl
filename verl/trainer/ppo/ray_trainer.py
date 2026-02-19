@@ -1340,9 +1340,22 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+
+                    # align with repeated responses in rollout
+                    if batch.batch.batch_size == gen_batch_output.batch.batch_size:
+                        # use the repeat method if the batch sizes match
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
+                    else:
+                        # Match by uid for variable-size multi-trajectory outputs (e.g. redel).
+                        # batch has one row per unique prompt; gen_batch_output has one row per
+                        # trajectory (n rollouts × (1 + subagents)), so a simple repeat won't align them.
+                        uid_to_batch_idx = {uid: i for i, uid in enumerate(batch.non_tensor_batch["uid"])}
+                        match_idxs = np.array(
+                            [uid_to_batch_idx[uid] for uid in gen_batch_output.non_tensor_batch["uid"]]
+                        )
+                        batch = batch.select_idxs(match_idxs)
+                        batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
