@@ -392,7 +392,7 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-        self.reward_func_is_multi_trajectory = config.reward.is_multi_trajectory
+        self.reward_func_is_multi_trajectory = config.reward.get("is_multi_trajectory", False)
 
     @tqbridge()
     async def generate_sequences(self, batch: DataProto) -> DataProto:
