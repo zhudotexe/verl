@@ -392,7 +392,7 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-        self.agent_loop_is_multi_trajectory = config.actor_rollout_ref.rollout.agent
+        self.reward_func_is_multi_trajectory = config.reward.is_multi_trajectory
 
     @tqbridge()
     async def generate_sequences(self, batch: DataProto) -> DataProto:
@@ -513,7 +513,7 @@ class AgentLoopWorker:
                 output = [output]
             internal_outputs = [await self._agent_loop_postprocess(o, **kwargs) for o in output]
 
-            if self.agent_loop_is_multi_trajectory:
+            if self.reward_func_is_multi_trajectory:
                 await self._compute_score_multi_trajectory(
                     internal_outputs,
                     prompts=torch.cat([o.prompt_ids for o in internal_outputs], dim=0),
