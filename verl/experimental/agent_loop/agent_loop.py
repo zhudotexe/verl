@@ -33,7 +33,7 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
-from verl.experimental.agent_loop.utils import maybe_flatten, resolve_config_path
+from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
@@ -784,33 +784,26 @@ class AgentLoopWorker:
             rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
             batch["rm_scores"] = rm_scores
 
-        # traj_counts[i] = number of trajectories produced by inputs[i] (1 for single-traj, 1+subagents for multi-traj)
-        traj_counts = [inp.prompt_ids.shape[0] for inp in inputs]
-
         non_tensor_batch = {
-            "__num_turns__": np.array(maybe_flatten([input.num_turns for input in inputs]), dtype=np.int32),
+            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32).flatten(),
         }
-
-        # propagate input metadata (uid, data_source, etc.), expanding each value per-trajectory
+        # todo(andrz): I don't think this runs in multi-traj
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
-            for key, val in input_non_tensor_batch.items():
-                non_tensor_batch[key] = np.repeat(val, traj_counts, axis=0)
+            non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
         reward_extra_keys = list(reward_extra_infos[0].keys())
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array(maybe_flatten([info[key] for info in reward_extra_infos]))
+            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos]).flatten()
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
-            non_tensor_batch["multi_modal_inputs"] = np.repeat(
-                np.array(multi_modal_inputs_list, dtype=object), traj_counts, axis=0
-            )
+            non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
-        # Collect extra fields from all inputs, expanding per-trajectory.
+        # Collect extra fields from all inputs and convert them to np.ndarray
         # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
         default_extra_keys = {
@@ -823,9 +816,9 @@ class AgentLoopWorker:
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
-            per_agent_vals = np.empty(len(inputs), dtype=object)
-            per_agent_vals[:] = [input.extra_fields.get(key) for input in inputs]
-            extra_fields[key] = np.repeat(per_agent_vals, traj_counts, axis=0)
+            temp_arr = np.empty(len(inputs), dtype=object)
+            temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
+            extra_fields[key] = temp_arr.flatten()
 
         non_tensor_batch.update(extra_fields)
 

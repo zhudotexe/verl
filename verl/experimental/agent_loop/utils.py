@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import itertools
+
 import os
 from typing import Any
 
@@ -106,15 +106,3 @@ def build_gpt_oss_tool_response_text(messages: list[dict[str, Any]], tool_call_n
         formatted = format_gpt_oss_tool_response_manually(tool_msg["content"], actual_tool_name)
         tool_response_texts.append(formatted)
     return add_generation_prompt_for_gpt_oss("".join(tool_response_texts))
-
-
-def maybe_flatten(x: list | list[list]):
-    """
-    Flatten a homogenously-typed list one level if it is a list of lists.
-    If not a list of lists, do nothing.
-    """
-    if not x:
-        return x
-    if isinstance(x[0], list):
-        return list(itertools.chain.from_iterable(x))
-    return x
