@@ -151,7 +151,7 @@ class AgentLoopOutput(BaseModel):
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
-    extra_fields: dict[str, Any] | list[dict[str, Any]] = {}
+    extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
 
@@ -178,7 +178,7 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
     """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
-    extra_fields: dict[str, Any] | list[dict[str, Any]] = {}
+    extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
 
@@ -726,10 +726,7 @@ class AgentLoopWorker:
                 "__num_turns__": np.array(
                     [output.num_turns] if not isinstance(output.num_turns, list) else output.num_turns
                 ),
-                "tool_extra_fields": np.array(
-                    [output.extra_fields] if not isinstance(output.extra_fields, list) else output.extra_fields,
-                    dtype=object,
-                ),
+                "tool_extra_fields": np.array([output.extra_fields] * bsz, dtype=object),
             }
 
             data = DataProto(
@@ -739,13 +736,7 @@ class AgentLoopWorker:
             selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
             result = await selected_reward_loop_worker_handle.compute_score.remote(data)
             output.reward_score = result["reward_score"]
-            if isinstance(output.extra_fields, list):
-                for i, ef in enumerate(output.extra_fields):
-                    ef["reward_extra_info"] = {
-                        k: result["reward_extra_info"][k][i] for k in result["reward_extra_info"]
-                    }
-            else:
-                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
     def _postprocess(
         self,
