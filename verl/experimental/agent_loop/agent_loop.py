@@ -33,7 +33,7 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
-from verl.experimental.agent_loop.utils import maybe_flatten, resolve_config_path
+from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
@@ -133,25 +133,25 @@ class AgentLoopMetrics(BaseModel):
 class AgentLoopOutput(BaseModel):
     """Agent loop output."""
 
-    prompt_ids: list[int] | list[list[int]]
+    prompt_ids: list[int]
     """Prompt token ids."""
-    response_ids: list[int] | list[list[int]]
+    response_ids: list[int]
     """Response token ids including LLM generated token, tool response token."""
-    response_mask: list[int] | list[list[int]]
+    response_mask: list[int]
     """Response mask, 1 for LLM generated token, 0 for tool response token."""
-    response_logprobs: Optional[list[float] | list[list[float]]] = None
+    response_logprobs: Optional[list[float]] = None
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
     """Routed experts for the total tokens."""
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
-    reward_score: Optional[float | list[float]] = None
+    reward_score: Optional[float] = None
     """Reward score for the trajectory."""
-    num_turns: int | list[int] = 0
+    num_turns: int = 0
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
-    extra_fields: dict[str, Any] | list[dict[str, Any]] = {}
+    extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
 
@@ -178,7 +178,7 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
     """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
-    extra_fields: dict[str, Any] | list[dict[str, Any]] = {}
+    extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
 
 
@@ -392,6 +392,8 @@ class AgentLoopWorker:
             trace_config.get("max_samples_per_step_per_worker", None),
         )
 
+        self.agent_loop_is_multi_trajectory = config.actor_rollout_ref.rollout.agent
+
     @tqbridge()
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
@@ -469,6 +471,7 @@ class AgentLoopWorker:
                 )
             )
         outputs = await asyncio.gather(*tasks)
+        outputs = list(itertools.chain.from_iterable(outputs))
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
@@ -482,7 +485,7 @@ class AgentLoopWorker:
         agent_name: str,
         trace: bool = True,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> list[_InternalAgentLoopOutput]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -505,10 +508,43 @@ class AgentLoopWorker:
                 dataset_cls=self.dataset_cls,
                 dataset_config=DictConfigWrap(self.config.data),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, **kwargs)
+            output: AgentLoopOutput | list[AgentLoopOutput] = await agent_loop.run(sampling_params, **kwargs)
+            if not isinstance(output, list):
+                output = [output]
+            internal_outputs = [await self._agent_loop_postprocess(o, **kwargs) for o in output]
 
-    async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
+            if self.agent_loop_is_multi_trajectory:
+                await self._compute_score_multi_trajectory(
+                    internal_outputs,
+                    prompts=torch.cat([o.prompt_ids for o in internal_outputs], dim=0),
+                    responses=torch.cat([o.response_ids for o in internal_outputs], dim=0),
+                    attention_mask=torch.cat([o.attention_mask for o in internal_outputs], dim=0),
+                    input_ids=torch.cat([o.input_ids for o in internal_outputs], dim=0),
+                    position_ids=torch.cat([o.position_ids for o in internal_outputs], dim=0),
+                    kwargs=kwargs,
+                )
+            else:
+                # for compatibility with single-trajectory compute score, we only
+                # compute the score for the first trajectory and apply it to all other outputs
+                # under the assumption that the agent loop is returning all related sequences, with the lastest first
+                await self._compute_score(
+                    internal_outputs[0],
+                    prompts=internal_outputs[0].prompt_ids,
+                    responses=internal_outputs[0].response_ids,
+                    attention_mask=internal_outputs[0].attention_mask,
+                    input_ids=internal_outputs[0].input_ids,
+                    position_ids=internal_outputs[0].position_ids,
+                    kwargs=kwargs,
+                )
+                for internal_output in internal_outputs[1:]:
+                    internal_output.reward_score = internal_outputs[0].reward_score
+                    internal_output.extra_fields["reward_extra_info"] = internal_outputs[0].extra_fields[
+                        "reward_extra_info"
+                    ]
+
+            return internal_outputs
+
+    async def _agent_loop_postprocess(self, output: AgentLoopOutput, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -569,24 +605,13 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            # multi-traj: if output.response_logprobs is not a batch,
-            if not isinstance(output.response_logprobs[0], list):
-                # pad it as a single list + unsqueeze to bsz 1
-                pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
-                response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
-            else:
-                # otherwise pad each element in the batch
-                temp = []
-                for elem in output.response_logprobs:
-                    pad_size = self.config.actor_rollout_ref.rollout.response_length - len(elem)
-                    temp.append(torch.tensor(elem + [0.0] * pad_size))
-                response_logprobs = torch.vstack(temp)
+            pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
+            response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
         input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
 
-        # todo(andrz) I don't think this works with multi-trajectory, but it also isn't used in multiturn so eh
         routed_experts = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
@@ -611,23 +636,10 @@ class AgentLoopWorker:
 
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
-        # todo(andrz) multi-trajectory won't like multimodal
-        if input_ids.shape[0] > 1:
-            multi_modal_inputs = {}  # hardcoded to not do any multimodal stuff
-            position_ids = compute_position_id_with_mask(attention_mask)  # this works with batch input already, yay
-        else:
-            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-            position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+        multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+        position_ids = self._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
 
-        await self._compute_score(
-            output,
-            prompts=prompt_output["input_ids"],
-            responses=response_output["input_ids"],
-            attention_mask=attention_mask,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            kwargs=kwargs,
-        )
+        # moved compute_score call from here to the end of generate_sequences
 
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
@@ -710,7 +722,40 @@ class AgentLoopWorker:
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
-            bsz = input_ids.shape[0]
+            batch = TensorDict(
+                {
+                    "prompts": prompts,  # [1, prompt_length]
+                    "responses": responses,  # [1, response_length]
+                    "attention_mask": attention_mask,  # [1, prompt_length + response_length]
+                    "input_ids": input_ids,  # [1, prompt_length + response_length]
+                    "position_ids": position_ids,
+                },
+                batch_size=1,
+            )
+            non_tensor_batch = {
+                **{k: np.array([v]) for k, v in kwargs.items()},
+                "__num_turns__": np.array([output.num_turns]),
+                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+            }
+
+            data = DataProto(
+                batch=batch,
+                non_tensor_batch=non_tensor_batch,
+            )
+            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+            output.reward_score = result["reward_score"]
+            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+
+    async def _compute_score_multi_trajectory(
+        self, outputs, prompts, responses, attention_mask, input_ids, position_ids, kwargs
+    ):
+        """Compute reward score for single sample."""
+        enable_async_reward = self.reward_loop_worker_handles is not None
+
+        if all(output.reward_score is None for output in outputs) and enable_async_reward:
+            # difference from single: we want to pack the whole traj group into the batch
+            bsz = len(outputs)
             batch = TensorDict(
                 {
                     "prompts": prompts,  # [bsz, prompt_length]
@@ -721,13 +766,13 @@ class AgentLoopWorker:
                 },
                 batch_size=bsz,
             )
+
+            # kwargs gets copied bsz times, the others pull from the corresponding output
             non_tensor_batch = {
                 **{k: np.array([v] * bsz) for k, v in kwargs.items()},
-                "__num_turns__": np.array(
-                    [output.num_turns] if not isinstance(output.num_turns, list) else output.num_turns
-                ),
+                "__num_turns__": np.array([output.num_turns for output in outputs]),
                 "tool_extra_fields": np.array(
-                    [output.extra_fields] if not isinstance(output.extra_fields, list) else output.extra_fields,
+                    [output.extra_fields for output in outputs],
                     dtype=object,
                 ),
             }
@@ -738,14 +783,12 @@ class AgentLoopWorker:
             )
             selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
             result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-            output.reward_score = result["reward_score"]
-            if isinstance(output.extra_fields, list):
-                for i, ef in enumerate(output.extra_fields):
-                    ef["reward_extra_info"] = {
-                        k: result["reward_extra_info"][k][i] for k in result["reward_extra_info"]
-                    }
-            else:
-                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            # multi-traj reward managers return
+            # {"reward_score": [scores...], "reward_extra_info": {k: [vs...]}}
+            # where list len == data len
+            for (i, output), score in zip(enumerate(outputs), result["reward_score"]):
+                output.reward_score = score
+                output.extra_fields["reward_extra_info"] = {k: v[i] for k, v in result["reward_extra_info"].items()}
 
     def _postprocess(
         self,
@@ -777,15 +820,10 @@ class AgentLoopWorker:
                 "position_ids": position_ids,
                 **optional_outputs,
             },
-            batch_size=prompt_ids.size(0),
+            batch_size=len(inputs),
         )
 
-        # score can be a float or a tensor
         scores = [input.reward_score for input in inputs]
-        if all(isinstance(score, list) for score in scores):
-            # flatten them if they're a list, which should ensure they match the bsz
-            scores = list(itertools.chain.from_iterable(scores))
-            assert len(scores) == prompt_ids.size(0)
         if all(score is not None for score in scores):
             prompt_length = prompt_ids.size(1)
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
@@ -793,33 +831,29 @@ class AgentLoopWorker:
             rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
             batch["rm_scores"] = rm_scores
 
-        # traj_counts[i] = number of trajectories produced by inputs[i] (1 for single-traj, 1+subagents for multi-traj)
-        traj_counts = [inp.prompt_ids.shape[0] for inp in inputs]
-
         non_tensor_batch = {
-            "__num_turns__": np.array(maybe_flatten([input.num_turns for input in inputs]), dtype=np.int32),
+            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
 
-        # propagate input metadata (uid, data_source, etc.), expanding each value per-trajectory
+        # todo(andrz): I don't think this runs in multi-traj
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
-            for key, val in input_non_tensor_batch.items():
-                non_tensor_batch[key] = np.repeat(val, traj_counts, axis=0)
+            if input_non_tensor_batch and len(inputs) != len(input_non_tensor_batch[input_non_tensor_batch.keys()[0]]):
+                raise RuntimeError("Cannot use synchronous reward model with multi-trajectory rewards currently")
+            non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
         reward_extra_keys = list(reward_extra_infos[0].keys())
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array(maybe_flatten([info[key] for info in reward_extra_infos]))
+            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
-            non_tensor_batch["multi_modal_inputs"] = np.repeat(
-                np.array(multi_modal_inputs_list, dtype=object), traj_counts, axis=0
-            )
+            non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
-        # Collect extra fields from all inputs, expanding per-trajectory.
+        # Collect extra fields from all inputs and convert them to np.ndarray
         # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
         default_extra_keys = {
@@ -832,9 +866,9 @@ class AgentLoopWorker:
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
-            per_agent_vals = np.empty(len(inputs), dtype=object)
-            per_agent_vals[:] = [input.extra_fields.get(key) for input in inputs]
-            extra_fields[key] = np.repeat(per_agent_vals, traj_counts, axis=0)
+            temp_arr = np.empty(len(inputs), dtype=object)
+            temp_arr[:] = [input.extra_fields.get(key) for input in inputs]
+            extra_fields[key] = temp_arr
 
         non_tensor_batch.update(extra_fields)
 
