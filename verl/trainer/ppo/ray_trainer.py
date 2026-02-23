@@ -1581,6 +1581,7 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 # multi-traj: we report the root-only and all-traj data metrics
+                print(batch[0])  # todo remove me
                 if "is_root_trajectory" in batch.non_tensor_batch:
                     root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"]
                     root_batch = batch.select_idxs(root_traj_idxs)
