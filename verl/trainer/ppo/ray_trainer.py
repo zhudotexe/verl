@@ -549,6 +549,12 @@ class RayPPOTrainer:
                 # replace with wake_up method once supported
                 self.checkpoint_manager.update_weights()
 
+            # multi-traj: if multi-traj, only keep the root trajectories (ASSUMPTION: we don't care about the
+            # intermediate trajs, since we aren't backpropping and we've already calculated reward)
+            if "is_root_trajectory" in test_output_gen_batch_padded.non_tensor_batch:
+                root_traj_idxs = test_output_gen_batch_padded.non_tensor_batch["is_root_trajectory"]
+                test_output_gen_batch_padded = test_output_gen_batch_padded.select_idxs(root_traj_idxs)
+
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
@@ -1574,6 +1580,13 @@ class RayPPOTrainer:
                     }
                 )
                 # collect metrics
+                # multi-traj: we report the root-only and all-traj data metrics
+                if "is_root_trajectory" in batch.non_tensor_batch:
+                    root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"]
+                    root_batch = batch.select_idxs(root_traj_idxs)
+                    root_data_metrics = compute_data_metrics(batch=root_batch, use_critic=self.use_critic)
+                    metrics.update({f"root/{k}": v for k, v in root_data_metrics.items()})
+
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo

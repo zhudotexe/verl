@@ -546,7 +546,8 @@ class AgentLoopWorker:
 
     async def _agent_loop_postprocess(self, output: AgentLoopOutput, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
-        output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        if "raw_prompt" not in output.extra_fields:
+            output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
         output.extra_fields["uid"] = kwargs["uid"]
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
