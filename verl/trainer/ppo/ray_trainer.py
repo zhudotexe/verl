@@ -552,7 +552,7 @@ class RayPPOTrainer:
             # multi-traj: if multi-traj, only keep the root trajectories (ASSUMPTION: we don't care about the
             # intermediate trajs, since we aren't backpropping and we've already calculated reward)
             if "is_root_trajectory" in test_output_gen_batch_padded.non_tensor_batch:
-                root_traj_idxs = test_output_gen_batch_padded.non_tensor_batch["is_root_trajectory"]
+                root_traj_idxs = test_output_gen_batch_padded.non_tensor_batch["is_root_trajectory"].astype(bool)
                 test_output_gen_batch_padded = test_output_gen_batch_padded.select_idxs(root_traj_idxs)
 
             # unpad
