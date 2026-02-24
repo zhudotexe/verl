@@ -277,7 +277,7 @@ def collect_nd_compute(collect_mask: list[bool], worker_group, output):
 
 
 def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(dp_size, *args, **kwargs)
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(dp_size, *args, **kwargs)
     return dispatch_nd_compute(dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs)
 
 
