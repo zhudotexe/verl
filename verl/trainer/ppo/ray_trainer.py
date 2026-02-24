@@ -1355,6 +1355,8 @@ class RayPPOTrainer:
                     batch = batch.select_idxs(match_idxs)
                     batch = batch.union(gen_batch_output)
 
+                    # todo multi-traj: pad to a multiple of dp by creating copies with 0 response/attn masks
+
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1574,12 +1576,24 @@ class RayPPOTrainer:
                 # collect metrics
                 # multi-traj: we report the root-only and all-traj data metrics
                 if "is_root_trajectory" in batch.non_tensor_batch:
-                    root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"]
+                    root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"].astype(bool)
                     root_batch = batch.select_idxs(root_traj_idxs)
                     root_data_metrics = compute_data_metrics(batch=root_batch, use_critic=self.use_critic)
-                    metrics.update({f"root/{k}": v for k, v in root_data_metrics.items()})
+                    metrics.update(root_data_metrics)
 
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                    # redel agent-root trajs
+                    if "is_agent_root_trajectory" in batch.non_tensor_batch:
+                        agent_root_traj_idxs = batch.non_tensor_batch["is_agent_root_trajectory"].astype(bool)
+                        agent_root_batch = batch.select_idxs(agent_root_traj_idxs)
+                        agent_root_data_metrics = compute_data_metrics(
+                            batch=agent_root_batch, use_critic=self.use_critic
+                        )
+                        metrics.update({f"redel-agent-root/{k}": v for k, v in agent_root_data_metrics.items()})
+
+                    all_data_metrics = compute_data_metrics(batch=batch, use_critic=self.use_critic)
+                    metrics.update({f"multi-trajectory-all/{k}": v for k, v in all_data_metrics.items()})
+                else:
+                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
