@@ -1355,8 +1355,6 @@ class RayPPOTrainer:
                     batch = batch.select_idxs(match_idxs)
                     batch = batch.union(gen_batch_output)
 
-                    # todo multi-traj: pad to a multiple of dp by creating copies with 0 response/attn masks
-
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
