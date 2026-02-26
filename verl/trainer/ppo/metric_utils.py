@@ -222,6 +222,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # redel
+    for redel_key in ["n_children", "n_children_recursive", "max_depth", "n_zombie"]:
+        if redel_key in batch.non_tensor_batch:
+            val = batch.non_tensor_batch[redel_key]
+            metrics[f"redel/{redel_key}/min"] = val.min()
+            metrics[f"redel/{redel_key}/max"] = val.max()
+            metrics[f"redel/{redel_key}/mean"] = val.mean()
+
     return metrics
 
 
