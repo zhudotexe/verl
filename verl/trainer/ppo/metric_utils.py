@@ -229,10 +229,9 @@ def compute_data_metrics(
 
     # log reward_extra_infos_dict means for training
     for key, values in reward_extra_infos_dict.items():
-        if values:
-            metrics[f"critic/rewards/{key}/min"] = np.min(values)
-            metrics[f"critic/rewards/{key}/max"] = np.max(values)
-            metrics[f"critic/rewards/{key}/mean"] = np.mean(values)
+        metrics[f"critic/rewards/{key}/min"] = values.min()
+        metrics[f"critic/rewards/{key}/max"] = values.max()
+        metrics[f"critic/rewards/{key}/mean"] = values.mean()
 
     # redel
     for redel_key in ["n_children", "n_children_recursive", "max_depth", "n_zombie"]:
