@@ -336,7 +336,10 @@ def register(agent_name: str):
 
     def decorator(subclass: type[AgentLoopBase]) -> type[AgentLoopBase]:
         fqdn = f"{subclass.__module__}.{subclass.__qualname__}"
-        _agent_loop_registry[agent_name] = {"_target_": fqdn}
+        if fqdn in _agent_loop_registry:
+            print(f"agent_loop @register(): {fqdn} already registered (maybe by an agent_loop.yaml), skipping")
+        else:
+            _agent_loop_registry[agent_name] = {"_target_": fqdn}
         return subclass
 
     return decorator
