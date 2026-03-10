@@ -373,6 +373,7 @@ class CheckpointEngineManager:
         # skip sleep replicas for disaggregated rollout
         if self.backend != "naive":
             return
+        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
         await asyncio.gather(*[r.sleep() for r in self.replicas])
 
     @auto_await

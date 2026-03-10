@@ -1576,7 +1576,9 @@ class RayPPOTrainer:
                 if "is_root_trajectory" in batch.non_tensor_batch:
                     root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"].astype(bool)
                     root_batch = batch.select_idxs(root_traj_idxs)
-                    root_data_metrics = compute_data_metrics(batch=root_batch, use_critic=self.use_critic)
+                    root_data_metrics = compute_data_metrics(
+                        batch=root_batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                    )
                     metrics.update(root_data_metrics)
 
                     # redel agent-root trajs
@@ -1584,14 +1586,22 @@ class RayPPOTrainer:
                         agent_root_traj_idxs = batch.non_tensor_batch["is_agent_root_trajectory"].astype(bool)
                         agent_root_batch = batch.select_idxs(agent_root_traj_idxs)
                         agent_root_data_metrics = compute_data_metrics(
-                            batch=agent_root_batch, use_critic=self.use_critic
+                            batch=agent_root_batch,
+                            use_critic=self.use_critic,
+                            reward_extra_infos_dict=reward_extra_infos_dict,
                         )
                         metrics.update({f"redel-agent-root/{k}": v for k, v in agent_root_data_metrics.items()})
 
-                    all_data_metrics = compute_data_metrics(batch=batch, use_critic=self.use_critic)
+                    all_data_metrics = compute_data_metrics(
+                        batch=batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                    )
                     metrics.update({f"multi-trajectory-all/{k}": v for k, v in all_data_metrics.items()})
                 else:
-                    metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                    metrics.update(
+                        compute_data_metrics(
+                            batch=batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                        )
+                    )
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
