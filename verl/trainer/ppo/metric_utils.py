@@ -78,7 +78,9 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
+def compute_data_metrics(
+    batch: DataProto, use_critic: bool = True, reward_extra_infos_dict: dict = None
+) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -102,6 +104,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
             - num_turns/mean, max, min: Statistics about the number of multi-turn conversations
     """
+    if reward_extra_infos_dict is None:
+        reward_extra_infos_dict
+
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
@@ -221,6 +226,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/min"] = tool_call_counts.min()
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
+
+    # log reward_extra_infos_dict means for training
+    for key, values in reward_extra_infos_dict.items():
+        if values:
+            metrics[f"critic/rewards/{key}/min"] = np.min(values)
+            metrics[f"critic/rewards/{key}/max"] = np.max(values)
+            metrics[f"critic/rewards/{key}/mean"] = np.mean(values)
 
     # redel
     for redel_key in ["n_children", "n_children_recursive", "max_depth", "n_zombie"]:
