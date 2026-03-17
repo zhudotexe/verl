@@ -555,6 +555,12 @@ class RayPPOTrainer:
                 # replace with wake_up method once supported
                 self.checkpoint_manager.update_weights(self.global_steps)
 
+            # multi-traj: if multi-traj, only keep the root trajectories (ASSUMPTION: we don't care about the
+            # intermediate trajs, since we aren't backpropping and we've already calculated reward)
+            if "is_root_trajectory" in test_output_gen_batch_padded.non_tensor_batch:
+                root_traj_idxs = test_output_gen_batch_padded.non_tensor_batch["is_root_trajectory"].astype(bool)
+                test_output_gen_batch_padded = test_output_gen_batch_padded.select_idxs(root_traj_idxs)
+
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
@@ -1354,8 +1360,13 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+                    # align with repeated responses in rollout by uid
+                    uid_to_batch_idx = {uid: i for i, uid in enumerate(batch.non_tensor_batch["uid"])}
+                    match_idxs = np.array(
+                        [uid_to_batch_idx[uid] for uid in gen_batch_output.non_tensor_batch["uid"]]
+                    )
+                    batch = batch.select_idxs(match_idxs)
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
@@ -1575,7 +1586,36 @@ class RayPPOTrainer:
                     }
                 )
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # multi-traj: we report the root-only and all-traj data metrics
+                if "is_root_trajectory" in batch.non_tensor_batch:
+                    root_traj_idxs = batch.non_tensor_batch["is_root_trajectory"].astype(bool)
+                    root_batch = batch.select_idxs(root_traj_idxs)
+                    root_data_metrics = compute_data_metrics(
+                        batch=root_batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                    )
+                    metrics.update(root_data_metrics)
+
+                    # redel agent-root trajs
+                    if "is_agent_root_trajectory" in batch.non_tensor_batch:
+                        agent_root_traj_idxs = batch.non_tensor_batch["is_agent_root_trajectory"].astype(bool)
+                        agent_root_batch = batch.select_idxs(agent_root_traj_idxs)
+                        agent_root_data_metrics = compute_data_metrics(
+                            batch=agent_root_batch,
+                            use_critic=self.use_critic,
+                            reward_extra_infos_dict=reward_extra_infos_dict,
+                        )
+                        metrics.update({f"redel-agent-root/{k}": v for k, v in agent_root_data_metrics.items()})
+
+                    all_data_metrics = compute_data_metrics(
+                        batch=batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                    )
+                    metrics.update({f"multi-trajectory-all/{k}": v for k, v in all_data_metrics.items()})
+                else:
+                    metrics.update(
+                        compute_data_metrics(
+                            batch=batch, use_critic=self.use_critic, reward_extra_infos_dict=reward_extra_infos_dict
+                        )
+                    )
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
