@@ -184,6 +184,8 @@ def compute_advantage(
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            is_root_trajectory=data.non_tensor_batch.get("is_root_trajectory"),
+            config=config,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns

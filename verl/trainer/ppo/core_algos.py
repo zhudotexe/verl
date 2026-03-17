@@ -271,6 +271,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    is_root_trajectory: np.ndarray = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -294,12 +295,17 @@ def compute_grpo_outcome_advantage(
         If norm_adv_by_std_in_grpo is True, the advantage is scaled by the std, as in the original GRPO.
         If False, the advantage is not scaled, as in Dr.GRPO (https://arxiv.org/abs/2503.20783).
 
+        If multi_traj_only_root_in_adv is True, only trajectories where `is_root_trajectory=True` are considered
+        for calculating the mean and stddev of a group.
+
     Returns:
         advantages: `(torch.Tensor)`
             shape is (bs, response_length)
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    if is_root_trajectory is None:
+        is_root_trajectory = np.ones(token_level_rewards.shape[0])
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
@@ -309,6 +315,8 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if config.multi_traj_only_root_in_adv and not is_root_trajectory[i]:
+                continue
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
