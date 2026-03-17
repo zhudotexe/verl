@@ -543,9 +543,13 @@ class DataParallelPPOActor(BasePPOActor):
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
+        # in the case of multi-trajectory, we want to do everything on-policy but have an unknown number of trajectories
+        # so we set config.ppo_mini_batch_size to huge. this causes problems if we don't clip it here
+        ppo_mini_batch_size = min(self.config.ppo_mini_batch_size, len(data))
+
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
-        mini_batches = data.split(self.config.ppo_mini_batch_size)
+        mini_batches = data.split(ppo_mini_batch_size)
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
@@ -560,7 +564,7 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     self.gradient_accumulation = (
-                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                        ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
@@ -580,7 +584,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
 
                     if self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
+                        loss_scale_factor = response_mask.shape[0] / ppo_mini_batch_size
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
