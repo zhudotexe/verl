@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from omegaconf import OmegaConf
 
 from . import algorithm, config
 from .algorithm import *  # noqa: F401
 from .config import *  # noqa: F401
 
 __all__ = config.__all__ + algorithm.__all__
+
+OmegaConf.register_new_resolver("eval", eval, replace=True)
