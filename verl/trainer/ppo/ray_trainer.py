@@ -1068,7 +1068,10 @@ class RayPPOTrainer:
                 for j, part in enumerate(rearrange_minibatch_lst):
                     global_partition_lst[j].extend([x + minibatch_size * i for x in part])
         else:
-            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
+            can_equal_partition = len(workload_lst) % dp_size == 0
+            global_partition_lst = get_seqlen_balanced_partitions(
+                workload_lst, k_partitions=dp_size, equal_size=can_equal_partition
+            )
         # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
         # Skip reordering within partitions for PrefixGrouper to maintain uid grouping
         if not getattr(self, "use_prefix_grouper", False):
