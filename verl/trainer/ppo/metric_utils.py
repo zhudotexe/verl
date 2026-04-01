@@ -227,6 +227,10 @@ def compute_data_metrics(
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # agent loop response_clipped
+    if "response_clipped" in batch.non_tensor_batch:
+        metrics["response_length/clip_ratio"] = batch.non_tensor_batch["response_clipped"].mean()
+
     # log reward_extra_infos_dict means for training
     for key, values in reward_extra_infos_dict.items():
         metrics[f"critic/rewards/{key}/min"] = values.min()
