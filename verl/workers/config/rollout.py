@@ -128,6 +128,8 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = MISSING
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # Timeout in seconds for ZMQ socket recv/send during weight transfer (0 = no timeout)
+    zmq_timeout_s: float = 120.0
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
 

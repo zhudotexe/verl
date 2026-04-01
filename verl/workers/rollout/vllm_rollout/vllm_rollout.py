@@ -155,9 +155,11 @@ class ServerAdapter(BaseRollout):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
 
+        zmq_timeout_s = self.config.checkpoint_engine.zmq_timeout_s
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
+            timeout=zmq_timeout_s if zmq_timeout_s > 0 else None,
             kwargs={**kwargs, "use_shm": self.use_shm},
         )
 
@@ -166,6 +168,10 @@ class ServerAdapter(BaseRollout):
         bucket_size = int(bucket_size_mb) << 20
         s = self.zmq_context.socket(zmq.REQ)
         s.bind(self.zmq_handle)
+        if zmq_timeout_s > 0:
+            zmq_timeout_ms = int(zmq_timeout_s * 1000)
+            s.setsockopt(zmq.RCVTIMEO, zmq_timeout_ms)
+            s.setsockopt(zmq.SNDTIMEO, zmq_timeout_ms)
 
         buffer, shm = None, None
         if not self.use_shm:
