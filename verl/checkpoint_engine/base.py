@@ -409,3 +409,6 @@ class CheckpointEngineManager:
 
         # 6. resume all unfinished requests for partial rollout
         await asyncio.gather(*[r.resume_all_requests() for r in self.replicas])
+
+        # 7. wake up all replicas so the inference engine is ready to serve requests
+        await asyncio.gather(*[r.wake_up() for r in self.replicas])
