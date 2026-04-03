@@ -233,9 +233,9 @@ def compute_data_metrics(
 
     # log reward_extra_infos_dict means for training
     for key, values in reward_extra_infos_dict.items():
-        metrics[f"critic/rewards/{key}/min"] = values.min()
-        metrics[f"critic/rewards/{key}/max"] = values.max()
-        metrics[f"critic/rewards/{key}/mean"] = values.mean()
+        metrics[f"critic/rewards/{key}/min"] = np.nanmin(values)
+        metrics[f"critic/rewards/{key}/max"] = np.nanmax(values)
+        metrics[f"critic/rewards/{key}/mean"] = np.nanmean(values)
 
     # redel
     for redel_key in ["n_children", "n_children_recursive", "max_depth", "n_zombie"]:
@@ -246,10 +246,10 @@ def compute_data_metrics(
             metrics[f"redel/{redel_key}/mean"] = val.mean()
     if "n_zombie" in batch.non_tensor_batch and "n_children" in batch.non_tensor_batch:
         n_children = batch.non_tensor_batch["n_children"]
-        zombie_ratio = batch.non_tensor_batch["n_zombie"] / np.where(n_children == 0, 1, n_children)
-        metrics["redel/zombie_ratio/min"] = zombie_ratio.min()
-        metrics["redel/zombie_ratio/max"] = zombie_ratio.max()
-        metrics["redel/zombie_ratio/mean"] = zombie_ratio.mean()
+        zombie_ratio = np.where(n_children == 0, np.nan, batch.non_tensor_batch["n_zombie"] / np.where(n_children == 0, 1, n_children))
+        metrics["redel/zombie_ratio/nanmin"] = np.nanmin(zombie_ratio)
+        metrics["redel/zombie_ratio/nanmax"] = np.nanmax(zombie_ratio)
+        metrics["redel/zombie_ratio/nanmean"] = np.nanmean(zombie_ratio)
 
     return metrics
 
