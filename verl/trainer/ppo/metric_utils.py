@@ -244,6 +244,12 @@ def compute_data_metrics(
             metrics[f"redel/{redel_key}/min"] = val.min()
             metrics[f"redel/{redel_key}/max"] = val.max()
             metrics[f"redel/{redel_key}/mean"] = val.mean()
+    if "n_zombie" in batch.non_tensor_batch and "n_children" in batch.non_tensor_batch:
+        n_children = batch.non_tensor_batch["n_children"]
+        zombie_ratio = batch.non_tensor_batch["n_zombie"] / np.where(n_children == 0, 1, n_children)
+        metrics["redel/zombie_ratio/min"] = zombie_ratio.min()
+        metrics["redel/zombie_ratio/max"] = zombie_ratio.max()
+        metrics["redel/zombie_ratio/mean"] = zombie_ratio.mean()
 
     return metrics
 
